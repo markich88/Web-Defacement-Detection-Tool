@@ -1,4 +1,3 @@
-
 from pyvirtualdisplay import Display
 
 from selenium import webdriver
@@ -6,8 +5,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.alert import Alert
-
 from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, StaleElementReferenceException
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
+
+
 import time as time_
 
 from bs4 import BeautifulSoup
@@ -19,17 +20,14 @@ import re
 
 import urllib2
 
-import psycopg2
-
 import traceback
 
 import ssdeep
 import similarity
 
+from multiprocessing import Pool, Process, Queue, Pipe, Lock
+from Queue import Empty
 
-
-conn = psycopg2.connect("dbname='webdfcdb5' user='webdfc' host='localhost' password='webdfc'")
-curr = conn.cursor()
 
 
 def multiset(list_):
@@ -41,13 +39,39 @@ def list_(multiset):
 
     return [m for c, m in multiset for i in range(0, c)]
 
+#sys.stdout = codecs.getwriter('utf-8')(sys.stdout)  #needed for printing Unicode in file
 
-sys.stdout = codecs.getwriter('utf-8')(sys.stdout)  #needed for printing Unicode in file
+display = None
+browser = None
+f = None
 
-display = Display(visible=0, size=(800, 600))
-display.start()
+def init():
+    global display, browser, f
 
-browser = webdriver.Chrome('/home/marko/workspace/chromedriver')
+    display = Display(visible=0, size=(800, 600))
+    display.start()
+
+    #Do not load images and use disk cache
+    chromeOptions = webdriver.ChromeOptions()
+    prefs={"profile.managed_default_content_settings.images": 2, 'disk-cache-size': 4096 }
+    chromeOptions.add_experimental_option('prefs', prefs)
+    browser = webdriver.Chrome('/home/marko/workspace/chromedriver', chrome_options=chromeOptions)
+
+    #browser = webdriver.Chrome('/home/marko/workspace/chromedriver')
+    browser.set_page_load_timeout(20)
+
+    f = open("scan.log", "a")
+
+worker = None
+_lock = None
+
+def printing(message):
+    global worker, _lock
+
+    _lock.acquire()
+    f.write("WORKER %s: %s" % (worker, message))
+    f.flush()
+    _lock.release()
 
 class Stale():
     pass
@@ -64,27 +88,6 @@ def visible(element):
         return False
     else:
         return True
-
-
-def getSignaturesAndDomains():
-
-    curr.execute("SELECT notifier.name, timestamp, deface_signature.id, ARRAY_AGG(ARRAY[type::bytea,element]) FROM notifier \
-                    JOIN deface_signature ON notifier.id=deface_signature.notifier_id \
-                    JOIN defaces_signature_elements_dfcsign ON defaces_signature_elements_dfcsign.deface_signature_id=deface_signature.id \
-                    JOIN elements_dfcsign ON defaces_signature_elements_dfcsign.elements_dfcsign_id=elements_dfcsign.id \
-                    GROUP BY notifier.name, timestamp, deface_signature.id")
-
-
-    table = curr.fetchall()
-
-    curr.close()
-    conn.close()
-
-    f = open("domains.file", "r")
-    domains = f.readlines()
-    f.close()
-
-    return table, domains
 
 
 #Function enables recovery if element disappears from DOM tree or page is refreshed
@@ -128,11 +131,11 @@ def calculateFuzzy(elements):
                         pic = urllib2.urlopen(url).read()
                         pics[url] = pic
                 except (urllib2.HTTPError, urllib2.URLError) as e:
-                    print "Not able to download image: %s\n" % (url, )
+                    printing("Not able to download image: %s\n" % (url, ))
                     pics[url] = None
                 except ValueError as e:
                     if 'unknown url type' in str(e):
-                        print "Incorrectly formatted URL.\n"
+                        printing("Incorrectly formatted URL.\n")
                         pics[url] = None
                     else:
                         raise e
@@ -163,9 +166,12 @@ def getElements(mirrorsrc):
     #creating dictionary of Elements
     allElems = {'alerts': [], 'texts': [], 'images': [], 'backgroundImages': [], 'music': []}
 
-    browser.get(mirrorsrc)
-
     try:
+        
+        if mirrorsrc[0:7] == 'http://' or mirrorsrc[0:8] == 'https://':
+            browser.get(mirrorsrc)
+        else:
+            browser.get('http://' + mirrorsrc)
 
         for i in range(0, ALERT_CONFIRMS + 1):       #number of alert confirms: 10 alerts and content
 
@@ -176,7 +182,7 @@ def getElements(mirrorsrc):
                                 EC.presence_of_element_located((By.TAG_NAME, "body"))
                                 )
                 except TimeoutException as e:
-                    #print "Time elapsed for zone-h page processing getElements\n"
+                    printing("Time elapsed for page processing in getElements: %s\n" % mirrorsrc)
                     break
                 else:
                     time_.sleep(2)  #safety hold in case HTML is not fully loaded, and time for potential another alert
@@ -221,7 +227,7 @@ def getElements(mirrorsrc):
 
 
             except UnexpectedAlertPresentException as e:
-                #print "Accepting alert in getElements: %s\n" % (Alert(browser).text,)
+                printing("Accepting alert in getElements (%s): %s\n" % (mirrorsrc, Alert(browser).text))
 
                 allElems['alerts'].append(Alert(browser).text)
                 allElems['texts'] = []
@@ -229,22 +235,28 @@ def getElements(mirrorsrc):
                 allElems['backgroundImages'] = []
                 allElems['music'] = []
 
-                #if i == ALERT_CONFIRMS:
-                    #print traceback.format_exc()
-                    #print "\n"
+                if i == ALERT_CONFIRMS:
+                    printing("Too many alerts to confirm, maybe something is not ok (%s).\n%s" % (mirrorsrc, traceback.format_exc()))
 
                 #Accept alert
                 Alert(browser).accept()
 
+    except TimeoutException as e:
+        #TODO: Replace with signal wait on ITIMER_PROF. That is real timeout we are seeking.
+        #Kernel time is important because TCP retransmitions on unreachanble or non-existing webpages.
+        #Waiting for the real time as Selenium does is unwanted in multiprocessor environment. Because
+        #pseudo concurrency implemented by OS there may be processes waiting to run, so real time will
+        #give wrong idea about webpage response time.
+        printing("Timeout on page loading in getElements: %s\n" % mirrorsrc)
     except:
-        #print "Unsuccessful processing of getElements\n"
-        #print traceback.format_exc()
-        #print "\n"
-        pass
-
+        printing("Unsuccessful processing in getElements (%s).\n%s" % (mirrorsrc, traceback.format_exc()))
+    finally:
+        browser.delete_all_cookies()
+        browser.execute_script("return window.stop")
+        
 
     allElemsWithContent = getElementContent(allElems)
-
+    
     return allElemsWithContent
 
 
@@ -416,66 +428,108 @@ def processDomainsList(domains, table):
                 elemDict[elemType] = p
 
         t2.append((t[0], t[1], t[2], elemDict))            
-            
-    for domain in domains:
-         
-         #TODO: map from domain to webpage URL. Is it needed?
-         elementsWebpage = processWebpage(domain)
-         #elementsWebpage = multiset(elementsWebpage)
-         #print "--------------------------------------elementsWebpage-----------------------------------------------------------------"
-         #print elementsWebpage
-
-         #elementsWebpage = spamsum.spamsum(serializeElements(elementsWebpage))
-
-         allElems = {'alerts': [], 'texts': [], 'images': [], 'backgroundImages': [], 'music': []}
-         allElems = {'alerts': [], 'texts': [], 'images': [], 'backgroundImages': [], 'music': []}
-            
-         elemsWebpage = {}
-         for elemType in elemTypes:
-             p = map(lambda x: x[1], filter(lambda x: x[0] == elemType, elementsWebpage))
-
-             if p:
-                elemsWebpage[elemType] = p
-
-            
-         maxN = -1
-         signMax = []
-         for sign in t2:
-
-            N = match(sign[3], elemsWebpage)
-
-            if N > maxN:
-                maxN = N
-                signMax = sign[0:3]
-
-         if maxN >= 0.75:
-             print "Defacement found at %s -> Notifier: %s, Signature ID: %s, Detected on: %s (%s%%)" % \
-                                        (domain.strip(), signMax[0], signMax[2], signMax[1], maxN*100)
-         else:
-             print "No defacement found (%s)" % (domain.strip(),)
-
-            
-
-
-def main():
 
 
     try:
-        table, domains = getSignaturesAndDomains()
-        processDomainsList(domains, table)
+            
+        while True:
 
-        print "Successfully done.\n"
-    except:
-        print "Unsuccessfully done.\n"
-        print traceback.format_exc()
-        print "\n"
-    finally:
-        browser.quit()
- 
+             domain = domains.get(False)
+
+             #TODO: map from domain to webpage URL. Is it needed?
+             elementsWebpage = processWebpage(domain)
+             #elementsWebpage = multiset(elementsWebpage)
+             #print "--------------------------------------elementsWebpage-----------------------------------------------------------------"
+             #print elementsWebpage
+
+             #elementsWebpage = spamsum.spamsum(serializeElements(elementsWebpage))
+
+             allElems = {'alerts': [], 'texts': [], 'images': [], 'backgroundImages': [], 'music': []}
+             allElems = {'alerts': [], 'texts': [], 'images': [], 'backgroundImages': [], 'music': []}
+                
+             elemsWebpage = {}
+             for elemType in elemTypes:
+                 p = map(lambda x: x[1], filter(lambda x: x[0] == elemType, elementsWebpage))
+
+                 if p:
+                    elemsWebpage[elemType] = p
+
+                
+             maxN = -1
+             signMax = []
+             for sign in t2:
+
+                N = match(sign[3], elemsWebpage)
+
+                if N > maxN:
+                    maxN = N
+                    signMax = sign[0:3]
+
+             if maxN >= 0.75:
+                 printing("Defacement found at %s -> Notifier: %s, Signature ID: %s, Detected on: %s (%s%%)\n" % \
+                                            (domain.strip(), signMax[0], signMax[2], signMax[1], maxN*100))
+             else:
+                 printing("No defacement found (%s)\n" % (domain.strip(), ))
+
+    except Empty:
+
+        pass
 
 
-print "----------------------------------------------------%s\
----------------------------------------------------------------------------------\n"  % (time_.strftime("%c"),)
-main()
+def main(defaceSignatures, pipe_child_conn, lock, queues, workerNum):
+    global worker, _lock
+
+    init()
+
+    #Must be set up before using printing function
+    worker = workerNum
+    _lock = lock
+    
+    #Piping protocol
+    while True:
+
+        try:
+
+            ins = pipe_child_conn.recv()
+
+            if ins[0] == 'TAKE':
+
+                queueNum = ins[1]
+
+                printing("Taking queue %s.\n" % (queueNum, ))
+
+                processDomainsList(queues[queueNum], defaceSignatures)
+
+                printing("Successfully done. Queue %s empty.\n" % (queueNum, ))
+
+                pipe_child_conn.send(['DONE', None])
+
+            elif ins[0] == 'DIE':
+
+                printing("Dead.\n")
+
+                browser.quit()
+                f.close()
+
+                return 0    # exit from process
+
+        except:
+            #In case this section is executed in single-threaded version of tool
+            #process would exit. In this case process will wait on pipe for new
+            #instruction, and potentialy many domains skipped in processing.
+            #Logs should be carefully monitored because execution
+            #of 'Unsuccessfully done' section points to bug (potentially unrecoverable).
+
+            pipe_child_conn.send(['DONE', None])
+
+            queueNum = ins[1]
+
+            printing("Unsuccessfully done. Queue %s may not be empty.\n%s\n" % (queueNum, traceback.format_exc()))
+        finally:
+            #browser.quit() #as process will continue we will not shut down browser
+            pass
+
+            
+
 
 
