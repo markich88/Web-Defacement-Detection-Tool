@@ -1,11 +1,15 @@
 import socket
 import urllib2
 import time
+import ssl
 
+
+with open('APIKEY', 'r') as f:
+    APIKEY = f.read().strip()
 
 POST = lambda cntlen, pic: '''\
 POST /in.php HTTP/1.1\r\n\
-HOST: 2captcha.com\r\n\
+Host: 2captcha.com\r\n\
 Connection: keep-alive\r\n\
 Content-Length: %d\r\n\
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryAQUtZWIPknqRJqiz\r\n\
@@ -17,14 +21,14 @@ post\r\n\
 ------WebKitFormBoundaryAQUtZWIPknqRJqiz\r\n\
 Content-Disposition: form-data; name="key"\r\n\
 \r\n\
-0e748f31b75a4cfb3a669d7abe18f9dd\r\n\
+%s\r\n\
 ------WebKitFormBoundaryAQUtZWIPknqRJqiz\r\n\
 Content-Disposition: form-data; name="file"; filename="captcha.png"\r\n\
 Content-Type: application/octet-stream\r\n\
 \r\n\
 %s\r\n\
 ------WebKitFormBoundaryAQUtZWIPknqRJqiz--\r\n\
-''' % (cntlen, pic)
+''' % (cntlen, APIKEY, pic)
 
 
 
@@ -107,11 +111,15 @@ def read_response(sock):
 
 
 host = "2captcha.com"
-port = 80
+port = 443
+
 
 def solve_captcha(imagepath):
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    context = ssl.create_default_context()
+    
+    sock = context.wrap_socket(socket.socket(socket.AF_INET, socket.SOCK_STREAM), server_hostname = host)
+
     sock.settimeout(10)        #max blocking na citanje/pisanje
     sock.connect((host, port))
 
@@ -127,7 +135,9 @@ def solve_captcha(imagepath):
     cntlen = len(pic) + pos
 
     send_request(sock, POST(cntlen, pic))
-    taskid = read_response(sock).split('|')[1]
+    resp = read_response(sock)
+    print resp
+    taskid = resp.split('|')[1]
 
     output = 'CAPCHA_NOT_READY'
     repeat = 0
@@ -136,7 +146,7 @@ def solve_captcha(imagepath):
         
         time.sleep(5)
 
-        f = urllib2.urlopen("http://2captcha.com/res.php?key=0e748f31b75a4cfb3a669d7abe18f9dd&action=get&id=%s" % (taskid,))
+        f = urllib2.urlopen("http://2captcha.com/res.php?key=%s&action=get&id=%s" % (APIKEY, taskid,))
 
         repeat += 1
 
