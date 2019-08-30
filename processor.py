@@ -7,7 +7,19 @@ import psycopg2
 import iptoolsng
 import datetime
 
-conn = psycopg2.connect("dbname='webdfcdb6' user='webdfc' host='localhost' password='webdfc'")
+
+import ConfigParser
+
+
+config = ConfigParser.RawConfigParser()
+config.read(['config'])
+
+cred = config.items('DATABASE')
+
+logindata = ' '.join([i[0] + '=' + i[1] for i in cred])
+
+
+conn = psycopg2.connect(logindata)
 curr = conn.cursor()
 
 

@@ -34,10 +34,20 @@ import urllib2
 import captcha
 import rateLimit
 
+import ConfigParser
+
+
+config = ConfigParser.RawConfigParser()
+config.read(['config'])
+
+cred = config.items('DATABASE')
+
+logindata = ' '.join([i[0] + '=' + i[1] for i in cred])
+
 #TODO: Add flushing to stdout.
 sys.stdout = codecs.getwriter('utf-8')(sys.stdout)  #needed for sending Unicode to file
 
-conn = psycopg2.connect("dbname='webdfcdb6' user='webdfc' host='localhost' password='webdfc'")
+conn = psycopg2.connect(logindata)
 
 
 display = Display(visible=0, size=(800, 600))

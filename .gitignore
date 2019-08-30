@@ -10,8 +10,8 @@
 /ASNsDomains.hr
 #Last defacement ID used in signature generation (default 0)
 /id.temp
-#2captcha API key
-/APIKEY
+#various configuration parameters
+/config
 
 ##ignore Vim swap files
 **/*.swp

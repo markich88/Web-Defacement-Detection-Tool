@@ -15,6 +15,7 @@ import worker as worker3
 import worker as worker4 
 import psycopg2
 import time
+import ConfigParser
 
 #One Worker - Multiple Queues - One Pipe (Two Connections)
 #Dispatcher - Multiple Workers
@@ -216,9 +217,9 @@ def QueueProcessAssignment(queuesLeft, processesStopped, queuesPerformance, queu
 #################################################################NAIVE STRATEGY#######################################################
 
 
-def getSignaturesAndDomains():
+def getSignaturesAndDomains(logindata):
 
-    conn = psycopg2.connect("dbname='webdfcdb6' user='webdfc' host='localhost' password='webdfc'")
+    conn = psycopg2.connect(logindata)
     curr = conn.cursor()
 
     curr.execute("SELECT notifier.name, timestamp, deface_signature.id, ARRAY_AGG(ARRAY[type::bytea,element]) FROM notifier \
@@ -258,7 +259,14 @@ for (asn, domains), index in zip(ASNsDomains.items(), range(len(Queues))):
     print asn, len(domains)
 
 
-table = getSignaturesAndDomains()
+config = ConfigParser.RawConfigParser()
+config.read(['config'])
+
+cred = config.items('DATABASE')
+
+logindata = ' '.join([i[0] + '=' + i[1] for i in cred])
+
+table = getSignaturesAndDomains(logindata)
 
 f = open("scan.log", "a")
 

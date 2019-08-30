@@ -2,10 +2,14 @@ import socket
 import urllib2
 import time
 import ssl
+import ConfigParser
 
 
-with open('APIKEY', 'r') as f:
-    APIKEY = f.read().strip()
+config = ConfigParser.RawConfigParser()
+config.read(['config'])
+
+APIKEY = config.get('APIKEY', 'key')
+
 
 POST = lambda cntlen, pic: '''\
 POST /in.php HTTP/1.1\r\n\
